@@ -1,0 +1,233 @@
+DATA CLEANING PIPELINE EXPLANATION
+====================================
+File: initial-data-analysis.py (Lines 1–83)
+Goal: Produce X_processed, a fully cleaned and encoded feature matrix ready for ML.
+
+================================================================================
+STEP 1 — DATA LOADING (Lines 1–5)
+================================================================================
+
+Two CSV files are loaded:
+  - NF-UNSW-NB15-v3.csv      : The main dataset of network flow records.
+  - NetFlow_v3_Features_VarType.csv : A metadata file that classifies each feature
+                                      as either "Categorical" or "Quantitative".
+
+The metadata file is what drives the split-pipeline approach used throughout
+this script — rather than guessing feature types, the pipeline reads them from
+a reference document.
+
+================================================================================
+STEP 2 — BASIC DEDUPLICATION AND NULL REMOVAL (Lines 7–9)
+================================================================================
+
+  df.drop_duplicates(inplace=True)
+    Removes any rows that are exact duplicates across all columns. Duplicate
+    network flow records can arise from logging redundancy or packet captures
+    and would inflate the training signal for those exact flows.
+
+  df.dropna(inplace=True)
+    Removes any row containing at least one missing value. This is a strict
+    approach ("complete case" analysis) that ensures no NaN values propagate
+    into downstream processing at this stage.
+
+================================================================================
+STEP 3 — LABEL SEPARATION (Lines 11–14)
+================================================================================
+
+  X = df.drop(columns=["Label"])
+  y = df["Label"]
+
+The target column ("Label", indicating benign or attack class) is separated
+from the feature matrix. This is standard practice to ensure the label never
+accidentally leaks into feature transformations like scaling or encoding.
+
+================================================================================
+STEP 4 — FEATURE TYPE SPLIT (Lines 18–27)
+================================================================================
+
+Using the metadata CSV, features are partitioned into two groups:
+
+  categorical_features : columns marked "Categorical" (e.g. IP addresses, ports,
+                         protocol flags, application protocols).
+  quantitative_features: columns marked "Quantitative" (e.g. byte counts,
+                         durations, packet rates).
+
+Only features that actually appear in X are kept (lines 23–24), guarding
+against mismatches between the metadata file and the actual dataset columns.
+
+This produces two sub-DataFrames:
+  X_cat   — the categorical slice
+  X_quant — the quantitative slice
+
+Each slice is then cleaned with a tailored pipeline suited to its data type.
+
+================================================================================
+STEP 5 — CATEGORICAL PIPELINE
+================================================================================
+
+--- 5a. Drop IP Address Columns (Line 32) ---
+
+  X_cat.drop(columns=["IPV4_SRC_ADDR", "IPV4_DST_ADDR"])
+
+IPv4 addresses are removed. Although categorical, raw IP addresses have
+extremely high cardinality (millions of unique values) and encode topology
+that does not generalise well across network environments. Including them
+would cause overfitting to specific hosts rather than learning attack patterns.
+
+--- 5b. Binary Decomposition of TCP Flag Columns (Lines 36–41) ---
+
+  flag_cols = ["TCP_FLAGS", "CLIENT_TCP_FLAGS", "SERVER_TCP_FLAGS"]
+
+TCP flags are stored as a single integer where each bit represents a flag:
+  Bit 0 = FIN, Bit 1 = SYN, Bit 2 = RST, Bit 3 = PSH, Bit 4 = ACK, Bit 5 = URG
+
+For each flag column and each of the 6 flag bits, a new binary column is created:
+  e.g. TCP_FLAGS_SYN, TCP_FLAGS_ACK, CLIENT_TCP_FLAGS_RST, etc.
+
+  The extraction uses a right-bit-shift followed by a bitwise AND with 1:
+    (value >> bit) & 1
+
+This converts one opaque integer into 6 interpretable binary features per
+column (18 new columns total from 3 flag columns). The original 3 flag
+columns are then dropped.
+
+Why this matters: a model cannot learn that "SYN without ACK = possible SYN
+flood" from a raw integer. Decomposed bits make each flag independently
+visible to the model.
+
+--- 5c. Label Encoding (Lines 46–50) ---
+
+  LabelEncoder is applied to every remaining column in X_cat.
+
+Each unique string value in a column is mapped to an integer (e.g.
+"TCP" → 0, "UDP" → 1). This is a prerequisite for the next step
+(one-hot encoding) and for handling columns like protocol names that
+are stored as strings.
+
+A dictionary of encoders (label_encoders) is stored so the same mapping
+can be reapplied to new data at inference time.
+
+--- 5d. One-Hot Encoding of Low-Cardinality Columns (Lines 53–54) ---
+
+  low_card_cols = [col for col in X_cat.columns if X_cat[col].nunique() < 20]
+  X_cat = pd.get_dummies(X_cat, columns=low_card_cols)
+
+Columns with fewer than 20 unique values are one-hot encoded (converted into
+one binary column per unique value). This avoids imposing a false ordinal
+relationship that label encoding implies (e.g., the model should not assume
+protocol 2 is "twice" protocol 1).
+
+High-cardinality columns (20+ unique values) are left as label-encoded
+integers to avoid an explosion in dimensionality.
+
+--- 5e. Frequency Encoding of Port Numbers (Lines 57–59) ---
+
+  For L4_SRC_PORT and L4_DST_PORT:
+    freq = X_cat[col].value_counts()
+    X_cat[col] = X_cat[col].map(freq)
+
+Each port number is replaced by how many times it appears in the dataset.
+This is a practical middle ground for high-cardinality columns like port
+numbers (0–65535): rather than one-hot encoding 65k possible values or using
+a raw integer that implies order, the frequency encodes real-world salience.
+Common ports (e.g. 80, 443) get high values; rare or ephemeral ports get low
+values, which is meaningful for anomaly detection.
+
+================================================================================
+STEP 6 — QUANTITATIVE PIPELINE
+================================================================================
+
+--- 6a. Infinity and NaN Handling (Lines 65–67) ---
+
+  X_quant.replace([np.inf, -np.inf], np.nan)
+  X_quant.dropna(axis=1, how="all")   # remove columns that are entirely NaN
+  X_quant.fillna(0)                   # fill any remaining NaNs with 0
+
+Network flow statistics often contain division-by-zero artifacts (e.g.
+bits-per-packet when packet count is 0), producing infinity values. These
+are first converted to NaN. Columns that become entirely NaN are dropped
+(they carry no information). Remaining isolated NaN cells are filled with 0,
+a safe default for flow metrics that represents "zero activity."
+
+--- 6b. Log Transformation (Line 70) ---
+
+  X_quant.apply(lambda col: np.log1p(col) if (col >= 0).all() else col)
+
+Many network flow features (byte counts, duration, packet counts) follow
+heavy-tailed or skewed distributions spanning many orders of magnitude.
+log1p(x) = log(1 + x) compresses large values while preserving 0 (log1p(0) = 0).
+
+Only non-negative columns are log-transformed (negative metrics such as
+differences or deltas are left unchanged to avoid domain errors).
+
+This greatly improves the behaviour of distance-based and gradient-based
+ML algorithms that assume roughly symmetric feature distributions.
+
+--- 6c. Outlier Clipping at 99th Percentile (Lines 73–74) ---
+
+  upper = X_quant.quantile(0.99)
+  X_quant = X_quant.clip(upper=upper, axis=1)
+
+Even after log-transformation, extreme outliers can skew scaling. Values
+above the 99th percentile per column are capped at that threshold. This is
+a soft approach — data is not deleted, just bounded — reducing the influence
+of pathological flows (e.g. a 10 GB transfer) on model training.
+
+--- 6d. Robust Scaling (Lines 77–79) ---
+
+  RobustScaler().fit_transform(X_quant)
+
+RobustScaler normalises each column by subtracting its median and dividing
+by its interquartile range (IQR) rather than using mean and standard deviation.
+This is preferable to StandardScaler for network data because:
+  - It is insensitive to remaining outliers (uses median, not mean).
+  - It does not assume a Gaussian distribution.
+  - It centres features around 0 with a consistent spread, which is required
+    by many ML algorithms (e.g. SVMs, neural networks, k-NN).
+
+================================================================================
+STEP 7 — RECOMBINATION INTO X_processed (Line 83)
+================================================================================
+
+  X_processed = pd.concat(
+      [X_cat.reset_index(drop=True), X_quant.reset_index(drop=True)],
+      axis=1
+  )
+
+The cleaned categorical and quantitative sub-DataFrames are concatenated
+horizontally (axis=1) back into a single feature matrix.
+
+reset_index(drop=True) is called on both before concatenation to ensure
+their row indices align correctly after the dropna and other operations
+that may have removed or reordered rows earlier in the pipeline.
+
+X_processed is the final output: a fully cleaned, encoded, and normalised
+feature matrix ready to be fed into a machine learning model for
+network intrusion detection.
+
+================================================================================
+SUMMARY OF TRANSFORMATIONS
+================================================================================
+
+Raw Data (df)
+  |
+  +-- drop_duplicates, dropna
+  |
+  +-- Separate label (y) from features (X)
+  |
+  +-- Split by VarType metadata
+       |
+       +-- X_cat (Categorical)
+       |     Drop IP addresses
+       |     Decompose TCP flags into binary bits
+       |     Label encode all columns
+       |     One-hot encode low-cardinality columns (<20 unique)
+       |     Frequency encode port numbers
+       |
+       +-- X_quant (Quantitative)
+             Replace inf → NaN, drop all-NaN cols, fill NaN → 0
+             Log-transform non-negative columns (log1p)
+             Clip values at 99th percentile
+             RobustScaler normalisation
+  |
+  +-- pd.concat → X_processed
