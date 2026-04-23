@@ -1,0 +1,8 @@
+Commands
+cd AI_NIDS
+
+python3 nids_capture.py -i ./pcap/dos-syn-flood.pcap -o ./output-csv/dos-syn-flood.csv
+python3 nids_capture.py -i ./pcap/brute-hydra-ssh.pcap -o ./output-csv/brute-hydra-ssh.csv
+python3 nids_capture.py -i ./pcap/brute-hydra-ftp-v2.pcap -o ./output-csv/brute-hydra-ftp-v2.csv
+python3 nids_capture.py -i ./pcap/recon-nmap-all-ports.pcap -o ./output-csv/recon-nmap-all-ports.csv
+python3 nids_capture.py -i ./pcap/recon-nmap-sCsV.pcap -o ./output-csv/recon-nmap-sCsV.csv
