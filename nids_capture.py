@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 nids_capture.py - NetFlow v3 feature extractor for AI-NIDS
+by Ka Shing Ng
 ===========================================================
 
 Captures live network traffic (or reads pcap files) and outputs CSV rows
