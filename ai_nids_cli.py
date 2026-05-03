@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-"""
-ai_nids_cli.py - AI-NIDS command line tool
-Extracts NetFlow v3 features from a pcap file or live interface,
-then classifies the flows via the Lambda API.
-
-Usage:
-    python ai_nids_cli.py -i capture.pcap
-    python ai_nids_cli.py -i capture.pcap -o flows.csv
-    sudo python ai_nids_cli.py -i eth0 --api-url https://....amazonaws.com/prod/predict --api-key KEY
-
-Examples:
-# Classify a pcap (URL/key as args)
-python ai_nids_cli.py -i capture.pcap --api-url https://YOUR_ID.execute-api.ap-southeast-2.amazonaws.com/prod/predict --api-key YOUR_KEY
-
-# Classify and also save the extracted CSV
-python ai_nids_cli.py -i capture.pcap -o flows.csv --api-url ... --api-key ...
-
-# Set env vars once so you don't type them every time
-export NIDS_API_URL=https://...amazonaws.com/prod/predict
-export NIDS_API_KEY=YOUR_KEY
-python ai_nids_cli.py -i capture.pcap
-
-# Just extract flows, skip classification
-python ai_nids_cli.py -i capture.pcap -o flows.csv --no-classify
-
-
-Set NIDS_API_URL and NIDS_API_KEY environment variables to avoid
-passing them on every invocation.
-"""
 
 import argparse
 import csv
