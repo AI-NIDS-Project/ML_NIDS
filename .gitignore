@@ -3,3 +3,6 @@
 /output-csv/
 /pcap-test-csv/
 /.claude/
+aws_s3_test.py
+/frontend/
+/docs/
