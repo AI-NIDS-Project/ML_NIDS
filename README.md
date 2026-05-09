@@ -1,10 +1,10 @@
 # ai_nids_cli.py - AI-NIDS command line tool
 by Josiah Wu, Henry Ng and Terry Wang
 ----
-The application can extract NetFlow v3 features from a pcap file or live interface, whose flows are classified via AWS Lambda API.
+The application can extract NetFlow v3 features from a pcap file or live interface, whose flows are then classified via AWS Lambda API.
 
 
-## Usage:
+## Example Usage:
 
 ```
     python ai_nids_cli.py -i capture.pcap
@@ -14,7 +14,7 @@ The application can extract NetFlow v3 features from a pcap file or live interfa
 
 Please contact us for the NIDS_API_URL and the NIDS_API_KEY.
 
-## Examples:
+## Other commands:
 
 ### Classify a pcap (URL/key as args)
 
