@@ -5,32 +5,22 @@ by Ka Shing Ng
 ===========================================================
 
 Captures live network traffic (or reads pcap files) and outputs CSV rows
-matching the 53-column NetFlow v3 feature schema used by NF-UNSW-NB15-v2.
+matching the 53-column NetFlow v3 features used by NF-UNSW-NB15-v2.
 
-Each row represents one completed flow (unidirectional packet sequence
+Each row represents one completed flow: unidirectional packet sequence
 between a source and destination, aggregated bidirectionally by 5-tuple).
 
-Usage:
-    # Live capture on interface (requires root/sudo)
+Example Usage:
+    ## Live capture on interface (requires root/sudo)
     sudo python3 nids_capture.py -i eth0 -o flows.csv
 
-    # Offline: read a pcap file
+    ## Offline: read a pcap file
     python3 nids_capture.py -i traffic.pcap -o flows.csv
 
-    # Stream to stdout (pipe into another tool)
+    ## Stream to stdout (pipe into another tool)
     sudo python3 nids_capture.py -i wlan0
 
-Architecture:
-    NFStreamer (nfstream)       - flow aggregation, L7 DPI, IAT stats
-    NetFlowV3Plugin (NFPlugin) - per-packet: TTL, TCP win, pkt buckets,
-                                 retransmissions, flags, DNS/FTP/ICMP
-    flow_to_row()              - maps nfstream fields → 53 output columns
-
-Future: add a second NFPlugin that loads a trained sklearn model and
-        classifies each flow on expiry. See the ModelPlugin stub at bottom.
-
-Dependencies:
-    pip install nfstream
+Dependencies: nfstream
 """
 
 import struct
@@ -41,11 +31,9 @@ import argparse
 from nfstream import NFStreamer, NFPlugin
 
 
-# ============================================================================
-# Constants
-# ============================================================================
+## Constants
 
-# TCP flag bitmask values (RFC 793 + RFC 3168)
+## TCP flag bitmask values (RFC 793 + RFC 3168)
 FLAG_FIN = 0x01
 FLAG_SYN = 0x02
 FLAG_RST = 0x04
@@ -55,11 +43,8 @@ FLAG_URG = 0x20
 FLAG_ECE = 0x40
 FLAG_CWR = 0x80
 
-# nDPI L7 protocol name → numeric ID (subset of common protocols).
-# Full list: https://github.com/ntop/nDPI/blob/dev/src/include/ndpi_protocol_ids.h
-# If a protocol name isn't in this table, we fall back to 0 (Unknown).
-# This mapping only matters if you pre-train on the NF-UNSW-NB15-v2 CSVs.
-# If you train your own model on this tool's output, consistency is automatic.
+## nDPI L7 protocol name → numeric ID (subset of common protocols).
+## Protocol number is zero if the protocol name isn't in the data.
 NDPI_PROTO_MAP = {
     "Unknown": 0, "FTP_CONTROL": 1, "POP3": 2, "SMTP": 3, "IMAP": 4,
     "DNS": 5, "IPP": 6, "HTTP": 7, "MDNS": 8, "NTP": 9, "NetBIOS": 10,
@@ -99,9 +84,8 @@ OUTPUT_COLUMNS = [
 ]
 
 
-# ============================================================================
-# Packet header parsing helpers
-# ============================================================================
+## Packet header parsing helpers
+
 
 def _parse_ipv4_ttl(ip_packet: bytes) -> int:
     """Extract TTL from IPv4 header (byte offset 8)."""
@@ -114,7 +98,7 @@ def _ipv4_header_length(ip_packet: bytes) -> int:
     """IHL field (lower nibble of byte 0) × 4 = header length in bytes."""
     if ip_packet and len(ip_packet) > 0:
         return (ip_packet[0] & 0x0F) * 4
-    return 20  # safe default
+    return 20 
 
 
 def _parse_tcp_window(ip_packet: bytes, ip_hdr_len: int) -> int:
@@ -152,48 +136,48 @@ def _parse_dns(ip_packet: bytes, ip_hdr_len: int):
     Parse DNS header from a UDP payload.
     Returns (query_id, query_type, ttl_answer) or (0, 0, 0) on failure.
     """
-    # UDP header is 8 bytes; DNS payload starts after that.
+    ## UDP header is 8 bytes; DNS payload starts after that.
     dns_offset = ip_hdr_len + 8
     if not ip_packet or len(ip_packet) < dns_offset + 12:
         return 0, 0, 0
 
     try:
-        # DNS header: ID (2), Flags (2), QDCount (2), ANCount (2), ...
+        ## DNS header: ID (2), Flags (2), QDCount (2), ANCount (2), ...
         txn_id, flags, qd_count, an_count = struct.unpack_from(
             "!HHHH", ip_packet, dns_offset
         )
-        # Parse the first question to get QTYPE.
-        # Skip QNAME: sequence of length-prefixed labels ending with 0x00.
+        ## Parse the first question to get QTYPE.
+        ## Skip QNAME: sequence of length-prefixed labels ending with 0x00.
         pos = dns_offset + 12
         while pos < len(ip_packet):
             label_len = ip_packet[pos]
             if label_len == 0:
-                pos += 1  # skip the terminating zero
+                pos += 1 
                 break
             pos += 1 + label_len
         else:
             return txn_id, 0, 0
 
-        # QTYPE (2 bytes) + QCLASS (2 bytes)
+        ## QTYPE (2 bytes) + QCLASS (2 bytes)
         if pos + 4 > len(ip_packet):
             return txn_id, 0, 0
         query_type = struct.unpack_from("!H", ip_packet, pos)[0]
-        pos += 4  # skip QTYPE + QCLASS
+        pos += 4  ## skip QTYPE + QCLASS
 
-        # Parse first answer record for TTL (only in responses: QR bit = 1).
+        ## Parse first answer record for TTL (only in responses: QR bit = 1).
         ttl_answer = 0
         is_response = (flags >> 15) & 1
         if is_response and an_count > 0 and pos + 12 <= len(ip_packet):
-            # Answer NAME is usually a pointer (2 bytes starting with 0xC0).
+            ## Answer NAME is usually a pointer (2 bytes starting with 0xC0).
             if ip_packet[pos] & 0xC0 == 0xC0:
                 pos += 2
             else:
-                # Walk labels (rare for answers, but handle it)
+                ## Walk labels (rare for answers, but handle it)
                 while pos < len(ip_packet) and ip_packet[pos] != 0:
                     pos += 1 + ip_packet[pos]
                 pos += 1
 
-            # TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA(...)
+            ## TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA
             if pos + 10 <= len(ip_packet):
                 ttl_answer = struct.unpack_from("!I", ip_packet, pos + 4)[0]
 
@@ -208,7 +192,7 @@ def _parse_ftp_reply_code(ip_packet: bytes, ip_hdr_len: int) -> int:
     Extract FTP reply code from the first TCP payload bytes.
     FTP responses start with a 3-digit numeric code (e.g. "220 Welcome").
     """
-    # TCP data offset: upper nibble of byte 12 of TCP header × 4
+    ## TCP data offset: upper nibble of byte 12 of TCP header × 4
     if not ip_packet or len(ip_packet) < ip_hdr_len + 13:
         return 0
     tcp_data_offset = ((ip_packet[ip_hdr_len + 12] >> 4) & 0x0F) * 4
@@ -226,9 +210,7 @@ def _parse_ftp_reply_code(ip_packet: bytes, ip_hdr_len: int) -> int:
     return 0
 
 
-# ============================================================================
-# NFPlugin - per-packet feature extraction
-# ============================================================================
+## NFPlugin - per-packet feature extraction
 
 class NetFlowV3Plugin(NFPlugin):
     """
@@ -238,7 +220,7 @@ class NetFlowV3Plugin(NFPlugin):
     expiry (on_expire). Features are stored as flow.udps.* attributes
     which nfstream includes in to_pandas() / to_csv() output.
 
-    Features computed here:
+    Features:
         - TCP flag bitmasks (cumulative OR per direction)
         - Min/Max TTL across all packets
         - Longest/Shortest raw packet size
@@ -253,7 +235,7 @@ class NetFlowV3Plugin(NFPlugin):
     def on_init(self, packet, flow):
         """Called once when the first packet of a new flow arrives."""
 
-        # --- TCP flag bitmasks (cumulative OR) ---
+        ## TCP flag bitmasks (cumulative OR)
         flags = _build_flag_byte(packet)
         flow.udps.tcp_flags = flags
         if packet.direction == 0:
@@ -263,16 +245,16 @@ class NetFlowV3Plugin(NFPlugin):
             flow.udps.client_tcp_flags = 0
             flow.udps.server_tcp_flags = flags
 
-        # --- TTL ---
+        ## TTL
         ttl = _parse_ipv4_ttl(packet.ip_packet)
         flow.udps.min_ttl = ttl
         flow.udps.max_ttl = ttl
 
-        # --- Raw packet size extremes (link-layer) ---
+        ## Raw packet size extremes (link-layer)
         flow.udps.longest_pkt = packet.raw_size
         flow.udps.shortest_pkt = packet.raw_size
 
-        # --- Packet-size buckets (by IP-layer size) ---
+        ## Packet-size buckets (by IP-layer size)
         flow.udps.pkts_up_to_128 = 0
         flow.udps.pkts_128_to_256 = 0
         flow.udps.pkts_256_to_512 = 0
@@ -280,10 +262,10 @@ class NetFlowV3Plugin(NFPlugin):
         flow.udps.pkts_1024_to_1514 = 0
         self._bucket_packet(packet, flow)
 
-        # --- Max TCP window per direction ---
+        ## Max TCP window per direction
         flow.udps.tcp_win_max_in = 0
         flow.udps.tcp_win_max_out = 0
-        if packet.protocol == 6:  # TCP
+        if packet.protocol == 6:  ## TCP
             ip_hdr_len = _ipv4_header_length(packet.ip_packet)
             win = _parse_tcp_window(packet.ip_packet, ip_hdr_len)
             if packet.direction == 0:
@@ -291,32 +273,32 @@ class NetFlowV3Plugin(NFPlugin):
             else:
                 flow.udps.tcp_win_max_out = win
 
-        # --- TCP retransmission tracking ---
-        # We track the "next expected sequence number" per direction.
-        # A packet whose seq < next_expected is counted as a retransmit.
+        ## TCP retransmission tracking 
+        ## Here, we track the "next expected sequence number" per direction.
+        ## A packet whose seq < next_expected is counted as a retransmit.
         flow.udps.retrans_in_bytes = 0
         flow.udps.retrans_in_pkts = 0
         flow.udps.retrans_out_bytes = 0
         flow.udps.retrans_out_pkts = 0
-        flow.udps._next_seq_in = 0   # src→dst expected next seq
-        flow.udps._next_seq_out = 0  # dst→src expected next seq
+        flow.udps._next_seq_in = 0   ## src→dst expected next seq
+        flow.udps._next_seq_out = 0  ## dst→src expected next seq
         if packet.protocol == 6:
             self._init_tcp_seq(packet, flow)
 
-        # --- ICMP ---
-        flow.udps.icmp_type_combined = 0  # type*256 + code
+        ## ICMP
+        flow.udps.icmp_type_combined = 0  ## type*256 + code
         flow.udps.icmp_ipv4_type = 0
-        if packet.protocol == 1:  # ICMP
+        if packet.protocol == 1: 
             self._parse_icmp(packet, flow)
 
-        # --- DNS (first packet only for query ID/type) ---
+        ## DNS (first packet only for query ID/type)
         flow.udps.dns_query_id = 0
         flow.udps.dns_query_type = 0
         flow.udps.dns_ttl_answer = 0
         if packet.protocol == 17 and (packet.src_port == 53 or packet.dst_port == 53):
             self._parse_dns_packet(packet, flow)
 
-        # --- FTP (look at server→client responses on port 21) ---
+        ## FTP (look at server→client responses on port 21)
         flow.udps.ftp_cmd_ret_code = 0
         if packet.protocol == 6 and (packet.src_port == 21 or packet.dst_port == 21):
             self._parse_ftp_packet(packet, flow)
@@ -324,7 +306,7 @@ class NetFlowV3Plugin(NFPlugin):
     def on_update(self, packet, flow):
         """Called for every subsequent packet belonging to this flow."""
 
-        # --- TCP flags: cumulative OR ---
+        ## TCP flags: cumulative OR
         flags = _build_flag_byte(packet)
         flow.udps.tcp_flags |= flags
         if packet.direction == 0:
@@ -332,7 +314,7 @@ class NetFlowV3Plugin(NFPlugin):
         else:
             flow.udps.server_tcp_flags |= flags
 
-        # --- TTL ---
+        ## TTL
         ttl = _parse_ipv4_ttl(packet.ip_packet)
         if ttl > 0:
             if ttl < flow.udps.min_ttl or flow.udps.min_ttl == 0:
@@ -340,16 +322,16 @@ class NetFlowV3Plugin(NFPlugin):
             if ttl > flow.udps.max_ttl:
                 flow.udps.max_ttl = ttl
 
-        # --- Raw packet size extremes ---
+        ## Raw packet size extremes
         if packet.raw_size > flow.udps.longest_pkt:
             flow.udps.longest_pkt = packet.raw_size
         if packet.raw_size < flow.udps.shortest_pkt:
             flow.udps.shortest_pkt = packet.raw_size
 
-        # --- Packet-size buckets ---
+        ## Packet-size buckets
         self._bucket_packet(packet, flow)
 
-        # --- TCP window max ---
+        ## TCP window max
         if packet.protocol == 6:
             ip_hdr_len = _ipv4_header_length(packet.ip_packet)
             win = _parse_tcp_window(packet.ip_packet, ip_hdr_len)
@@ -358,25 +340,25 @@ class NetFlowV3Plugin(NFPlugin):
             else:
                 flow.udps.tcp_win_max_out = max(flow.udps.tcp_win_max_out, win)
 
-        # --- TCP retransmission detection ---
+        ## TCP retransmission detection
         if packet.protocol == 6:
             self._check_retransmission(packet, flow)
 
-        # --- ICMP (take first non-zero) ---
+        ## ICMP (take first non-zero)
         if packet.protocol == 1 and flow.udps.icmp_type_combined == 0:
             self._parse_icmp(packet, flow)
 
-        # --- DNS (update answer TTL from responses) ---
+        ## DNS (update answer TTL from responses)
         if packet.protocol == 17 and (packet.src_port == 53 or packet.dst_port == 53):
             self._parse_dns_packet(packet, flow)
 
-        # --- FTP (capture reply code if not yet found) ---
+        ## FTP (capture reply code if not yet found)
         if (packet.protocol == 6
                 and flow.udps.ftp_cmd_ret_code == 0
                 and (packet.src_port == 21 or packet.dst_port == 21)):
             self._parse_ftp_packet(packet, flow)
 
-    # ----- Internal helpers -----
+    ## Internal helpers
 
     @staticmethod
     def _bucket_packet(packet, flow):
@@ -398,7 +380,7 @@ class NetFlowV3Plugin(NFPlugin):
         """Set initial next-expected-seq from the first TCP packet."""
         ip_hdr_len = _ipv4_header_length(packet.ip_packet)
         seq = _parse_tcp_seq(packet.ip_packet, ip_hdr_len)
-        # next_expected = seq + payload_size (+ 1 if SYN or FIN)
+        ## next_expected = seq + payload_size (+ 1 if SYN or FIN)
         payload = packet.payload_size
         adjust = 1 if (packet.syn or packet.fin) else 0
         next_seq = (seq + payload + adjust) & 0xFFFFFFFF
@@ -471,9 +453,7 @@ class NetFlowV3Plugin(NFPlugin):
             flow.udps.ftp_cmd_ret_code = code
 
 
-# ============================================================================
-# Flow → output row conversion
-# ============================================================================
+## Flow to output row conversion
 
 def _safe_div(numerator, denominator, default=0):
     """Division with zero-denominator protection."""
@@ -500,13 +480,13 @@ def flow_to_row(flow) -> dict:
         3. Our NetFlowV3Plugin udps.* attributes (TTL, flags, etc.)
     """
 
-    # --- Durations with zero-guard for rate calculations ---
+    ## Durations with zero-guard for rate calculations
     dur_ms = flow.bidirectional_duration_ms
     dur_in_ms = flow.src2dst_duration_ms
     dur_out_ms = flow.dst2src_duration_ms
 
     return {
-        # Flow identification (5-tuple + L7)
+        ## Flow identification (5-tuple + L7)
         "IPV4_SRC_ADDR":              flow.src_ip,
         "IPV4_DST_ADDR":              flow.dst_ip,
         "L4_SRC_PORT":                flow.src_port,
@@ -514,73 +494,73 @@ def flow_to_row(flow) -> dict:
         "PROTOCOL":                   flow.protocol,
         "L7_PROTO":                   _resolve_l7_proto(flow),
 
-        # Byte and packet counts (src→dst = IN, dst→src = OUT)
+        ## Byte and packet counts (src→dst = IN, dst→src = OUT)
         "IN_BYTES":                   flow.src2dst_bytes,
         "OUT_BYTES":                  flow.dst2src_bytes,
         "IN_PKTS":                    flow.src2dst_packets,
         "OUT_PKTS":                   flow.dst2src_packets,
 
-        # Duration
+        ## Duration
         "FLOW_DURATION_MILLISECONDS": dur_ms,
         "DURATION_IN":                dur_in_ms,
         "DURATION_OUT":               dur_out_ms,
 
-        # TCP flags (from plugin)
+        ## TCP flags (from plugin)
         "TCP_FLAGS":                  flow.udps.tcp_flags,
         "CLIENT_TCP_FLAGS":           flow.udps.client_tcp_flags,
         "SERVER_TCP_FLAGS":           flow.udps.server_tcp_flags,
 
-        # TTL (from plugin)
+        ## TTL (from plugin)
         "MIN_TTL":                    flow.udps.min_ttl,
         "MAX_TTL":                    flow.udps.max_ttl,
 
-        # Packet sizes - raw (link layer) for longest/shortest,
-        # IP layer for min/max IP pkt len.
+        ## Packet sizes - raw (link layer) for longest/shortest,
+        ## IP layer for min/max IP pkt len.
         "LONGEST_FLOW_PKT":          flow.udps.longest_pkt,
         "SHORTEST_FLOW_PKT":         flow.udps.shortest_pkt,
         "MIN_IP_PKT_LEN":            getattr(flow, "bidirectional_min_ps", 0),
         "MAX_IP_PKT_LEN":            getattr(flow, "bidirectional_max_ps", 0),
 
-        # Throughput / rate (derived from core fields)
+        ## Throughput / rate (derived from core fields)
         "SRC_TO_DST_SECOND_BYTES":   _safe_div(flow.src2dst_bytes * 1000, dur_in_ms),
         "DST_TO_SRC_SECOND_BYTES":   _safe_div(flow.dst2src_bytes * 1000, dur_out_ms),
         "SRC_TO_DST_AVG_THROUGHPUT": _safe_div(flow.src2dst_bytes * 8000, dur_in_ms),
         "DST_TO_SRC_AVG_THROUGHPUT": _safe_div(flow.dst2src_bytes * 8000, dur_out_ms),
 
-        # Retransmissions (from plugin)
+        ## Retransmissions (from plugin)
         "RETRANSMITTED_IN_BYTES":    flow.udps.retrans_in_bytes,
         "RETRANSMITTED_IN_PKTS":     flow.udps.retrans_in_pkts,
         "RETRANSMITTED_OUT_BYTES":   flow.udps.retrans_out_bytes,
         "RETRANSMITTED_OUT_PKTS":    flow.udps.retrans_out_pkts,
 
-        # Packet size distribution buckets (from plugin)
+        ## Packet size distribution buckets (from plugin)
         "NUM_PKTS_UP_TO_128_BYTES":  flow.udps.pkts_up_to_128,
         "NUM_PKTS_128_TO_256_BYTES": flow.udps.pkts_128_to_256,
         "NUM_PKTS_256_TO_512_BYTES": flow.udps.pkts_256_to_512,
         "NUM_PKTS_512_TO_1024_BYTES":flow.udps.pkts_512_to_1024,
         "NUM_PKTS_1024_TO_1514_BYTES":flow.udps.pkts_1024_to_1514,
 
-        # TCP window max per direction (from plugin)
+        ## TCP window max per direction (from plugin)
         "TCP_WIN_MAX_IN":            flow.udps.tcp_win_max_in,
         "TCP_WIN_MAX_OUT":           flow.udps.tcp_win_max_out,
 
-        # ICMP (from plugin)
+        ## ICMP (from plugin)
         "ICMP_TYPE":                 flow.udps.icmp_type_combined,
         "ICMP_IPV4_TYPE":            flow.udps.icmp_ipv4_type,
 
-        # DNS (from plugin)
+        ## DNS (from plugin)
         "DNS_QUERY_ID":              flow.udps.dns_query_id,
         "DNS_QUERY_TYPE":            flow.udps.dns_query_type,
         "DNS_TTL_ANSWER":            flow.udps.dns_ttl_answer,
 
-        # FTP (from plugin)
+        ## FTP (from plugin)
         "FTP_COMMAND_RET_CODE":      flow.udps.ftp_cmd_ret_code,
 
-        # Timestamps
+        ## Timestamps
         "FLOW_START_MILLISECONDS":   flow.bidirectional_first_seen_ms,
         "FLOW_END_MILLISECONDS":     flow.bidirectional_last_seen_ms,
 
-        # Inter-Arrival Time stats (from nfstream statistical_analysis)
+        ## Inter-Arrival Time stats (from nfstream statistical_analysis)
         "SRC_TO_DST_IAT_MIN":       getattr(flow, "src2dst_min_piat_ms", 0),
         "SRC_TO_DST_IAT_MAX":       getattr(flow, "src2dst_max_piat_ms", 0),
         "SRC_TO_DST_IAT_AVG":       getattr(flow, "src2dst_mean_piat_ms", 0),
@@ -592,9 +572,7 @@ def flow_to_row(flow) -> dict:
     }
 
 
-# ============================================================================
-# Main entry point
-# ============================================================================
+## Main entry point
 
 def create_streamer(source: str, bpf_filter: str = None) -> NFStreamer:
     """
@@ -622,10 +600,10 @@ def create_streamer(source: str, bpf_filter: str = None) -> NFStreamer:
 
 def run_capture(source: str, output_path: str = None, bpf_filter: str = None):
     """
-    Main capture loop. Reads flows from source (interface or pcap),
-    converts each to a 53-column row, and writes CSV.
+    Main capture function. Reads flows from source (interface or pcap),
+    Converts each to a 53-column row, and writes CSV.
 
-    Args:
+    Arguments:
         source:      Network interface name ("eth0") or pcap file path.
         output_path: CSV output file path, or None for stdout.
         bpf_filter:  Optional BPF filter (e.g. "tcp port 80").
@@ -643,7 +621,7 @@ def run_capture(source: str, output_path: str = None, bpf_filter: str = None):
             writer.writerow(row)
             flow_count += 1
 
-            # Progress indicator on stderr for long captures
+            ## Progress indicator on stderr for long captures
             if flow_count % 1000 == 0:
                 print(f"[nids_capture] {flow_count} flows exported...",
                       file=sys.stderr)
@@ -658,45 +636,6 @@ def run_capture(source: str, output_path: str = None, bpf_filter: str = None):
                   file=sys.stderr)
 
     return flow_count
-
-
-# ============================================================================
-# Stage 2 stub: plug a trained model into the same pipeline
-# ============================================================================
-#
-# To classify flows live, create a second NFPlugin like this:
-#
-#   import numpy as np
-#   import joblib
-#
-#   class ModelPlugin(NFPlugin):
-#       def on_init(self, packet, flow):
-#           flow.udps.prediction = -1       # not yet classified
-#           flow.udps.prediction_proba = 0.0
-#
-#       def on_expire(self, flow):
-#           row = flow_to_row(flow)
-#           # Use only the numeric features your model was trained on.
-#           feature_names = [c for c in OUTPUT_COLUMNS
-#                            if c not in ("IPV4_SRC_ADDR", "IPV4_DST_ADDR")]
-#           X = np.array([[row[f] for f in feature_names]])
-#           flow.udps.prediction = int(self.model.predict(X)[0])
-#           flow.udps.prediction_proba = float(
-#               self.model.predict_proba(X)[0].max()
-#           )
-#
-# Then pass both plugins to the streamer:
-#
-#   model = joblib.load("trained_rf.pkl")
-#   streamer = NFStreamer(
-#       source="eth0",
-#       statistical_analysis=True,
-#       accounting_mode=1,
-#       n_dissections=20,
-#       udps=NetFlowV3Plugin(),
-#   )
-#   # Note: nfstream supports a single udps plugin. To chain both,
-#   # merge ModelPlugin logic into NetFlowV3Plugin.on_expire().
 
 
 def main():

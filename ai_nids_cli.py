@@ -12,9 +12,7 @@ import urllib.error
 from nids_capture import create_streamer, flow_to_row, OUTPUT_COLUMNS
 
 
-# ============================================================================
-# Flow extraction
-# ============================================================================
+## Flow extraction
 
 def capture_flows(source, bpf_filter=None):
     streamer = create_streamer(source, bpf_filter)
@@ -36,10 +34,7 @@ def rows_to_csv(rows):
     writer.writerows(rows)
     return buf.getvalue()
 
-
-# ============================================================================
-# Lambda classification
-# ============================================================================
+## Lambda classification
 
 def classify(csv_data, api_url, api_key):
     req = urllib.request.Request(
@@ -63,10 +58,7 @@ def classify(csv_data, api_url, api_key):
         print(f"[ai_nids_cli] Check that --api-url is correct: {api_url}", file=sys.stderr)
         sys.exit(1)
 
-
-# ============================================================================
-# Results display
-# ============================================================================
+## Results display
 
 def print_results(results):
     print("\n" + "=" * 52)
@@ -102,9 +94,8 @@ def print_results(results):
     print()
 
 
-# ============================================================================
-# Entry point
-# ============================================================================
+
+## Entry point
 
 def main():
     parser = argparse.ArgumentParser(
@@ -136,7 +127,7 @@ def main():
                         help="Skip classification — only extract and optionally save flows.")
     args = parser.parse_args()
 
-    # Step 1 — extract flows
+    ## Step 1: Flow Extraction
     rows = capture_flows(args.interface, args.filter)
     if not rows:
         print("[ai_nids_cli] No flows captured. Check file path and permissions.", file=sys.stderr)
@@ -145,13 +136,13 @@ def main():
 
     csv_data = rows_to_csv(rows)
 
-    # Step 2 — save CSV if requested
+    ## Step 2: save CSV if requested
     if args.output:
         with open(args.output, "w", newline="") as f:
             f.write(csv_data)
         print(f"[ai_nids_cli] Flows saved to {args.output}", file=sys.stderr)
 
-    # Step 3 — classify
+    # Step 3: Classification
     if args.no_classify:
         return
 
