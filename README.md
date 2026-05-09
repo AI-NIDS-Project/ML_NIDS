@@ -36,7 +36,7 @@ python ai_nids_cli.py -i capture.pcap -o flows.csv --api-url NIDS_API_URL --api-
 python ai_nids_cli.py -i capture.pcap -o flows.csv --no-classify
 ```
 
-## Recommended: Set env vars before usage
+## Recommended: Set API key and URL as environment variables before usage
 
 ```
 $env:NIDS_API_URL="..."; code .
