@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nids_capture.py - NetFlow v3 feature extractor for AI-NIDS
+nids_capture.py - NetFlow v3 feature extractor for ML-NIDS
 by Ka Shing Ng
 ===========================================================
 
