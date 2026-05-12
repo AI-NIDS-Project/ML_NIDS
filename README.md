@@ -1,4 +1,4 @@
-# ai_nids_cli.py - AI-NIDS command line tool
+# ML-NIDS command line tool
 
 ## by Josiah Wu, Henry Ng and Terry Wang
 
